@@ -1,9 +1,9 @@
 diff --git a/chirp/modern.py b/chirp/modern.py
 new file mode 100644
-index 0000000..860678f
+index 0000000..59680f3
 --- /dev/null
 +++ b/chirp/modern.py
-@@ -0,0 +1,1023 @@
+@@ -0,0 +1,1021 @@
 +"""Modern UV-5R-focused desktop interface backed by CHIRP drivers."""
 +
 +import sys
@@ -199,17 +199,16 @@ index 0000000..860678f
 +        self.longitude.setPlaceholderText("Optional, e.g. -74.0060")
 +        location.addRow("Longitude", self.longitude)
 +        self.distance = QtWidgets.QSpinBox()
-+        self.distance.setRange(0, 1000)
-+        self.distance.setValue(80)
-+        self.distance.setSuffix(" km")
++        self.distance.setRange(0, 620)
++        self.distance.setValue(50)
++        self.distance.setSuffix(" mi")
 +        self.distance.setSpecialValueText("No distance limit")
 +        location.addRow("Maximum distance", self.distance)
 +        self.open_only = QtWidgets.QCheckBox("Open repeaters only")
 +        self.open_only.setChecked(True)
 +        location.addRow("", self.open_only)
 +        layout.addWidget(self.location_box)
-+        self.nearby.toggled.connect(self.location_box.setEnabled)
-+        self.location_box.setEnabled(False)
++        self.nearby.setChecked(True)
 +        self.update_states()
 +
 +        buttons = QtWidgets.QDialogButtonBox(
@@ -261,7 +260,9 @@ index 0000000..860678f
 +            "state": self.state.currentData(),
 +            "lat": self.latitude.text().strip(),
 +            "lon": self.longitude.text().strip(),
-+            "dist": str(self.distance.value() or ""),
++            "dist": (
++                str(round(self.distance.value() * 1.609344))
++                if self.distance.value() else ""),
 +            "filter": "",
 +            "bands": [],
 +            "modes": ["FM"],
@@ -306,8 +307,8 @@ index 0000000..860678f
 +        self.longitude.setPlaceholderText("Optional, e.g. -74.0060")
 +        form.addRow("Longitude", self.longitude)
 +        self.distance = QtWidgets.QSpinBox()
-+        self.distance.setRange(0, 1000)
-+        self.distance.setSuffix(" km")
++        self.distance.setRange(0, 620)
++        self.distance.setSuffix(" mi")
 +        self.distance.setSpecialValueText("No distance limit")
 +        form.addRow("Maximum distance", self.distance)
 +        self.search = QtWidgets.QLineEdit()
@@ -363,7 +364,9 @@ index 0000000..860678f
 +            "state": self.state.currentText(),
 +            "lat": self.latitude.text().strip(),
 +            "lon": self.longitude.text().strip(),
-+            "dist": str(self.distance.value() or ""),
++            "dist": (
++                str(round(self.distance.value() * 1.609344))
++                if self.distance.value() else ""),
 +            "filter": self.search.text().strip(),
 +            "bands": [],
 +            "modes": ["FM"],
@@ -456,9 +459,6 @@ index 0000000..860678f
 +        titles.addWidget(page)
 +        header.addLayout(titles)
 +        header.addStretch()
-+        self.repeaterbook_button = QtWidgets.QPushButton("RepeaterBook")
-+        self.repeaterbook_button.clicked.connect(self.find_repeaters)
-+        header.addWidget(self.repeaterbook_button)
 +        self.assistant_button = QtWidgets.QPushButton("Setup assistant")
 +        self.assistant_button.setProperty("accent", True)
 +        self.assistant_button.clicked.connect(self.setup_assistant)
@@ -871,7 +871,6 @@ index 0000000..860678f
 +            return
 +        self.progress.setValue(0)
 +        self.progress.show()
-+        self.repeaterbook_button.setEnabled(False)
 +        self.statusBar().showMessage("Connecting to RepeaterBook…")
 +        self.rb_thread = QtCore.QThread(self)
 +        self.rb_worker = RepeaterBookWorker(dialog.params())
@@ -977,7 +976,6 @@ index 0000000..860678f
 +        self.change_metric.setText("Unsaved" if self.modified else "Saved")
 +        self.save_button.setEnabled(True)
 +        self.upload_button.setEnabled(True)
-+        self.repeaterbook_button.setEnabled(True)
 +        self.assistant_button.setEnabled(True)
 +        self.add_button.setEnabled(True)
 +        self.delete_button.setEnabled(True)
@@ -1242,10 +1240,10 @@ index 0000000..6d4a4ba
 +    main()
 diff --git a/tests/unit/test_modern.py b/tests/unit/test_modern.py
 new file mode 100644
-index 0000000..6768936
+index 0000000..c9c429d
 --- /dev/null
 +++ b/tests/unit/test_modern.py
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,291 @@
 +import os
 +import tempfile
 +import unittest
@@ -1390,7 +1388,6 @@ index 0000000..6768936
 +                fresh.download_button,
 +                fresh.upload_button,
 +                fresh.save_button,
-+                fresh.repeaterbook_button,
 +                fresh.assistant_button,
 +                fresh.add_button,
 +                fresh.delete_button,
@@ -1430,10 +1427,14 @@ index 0000000..6768936
 +
 +    def test_setup_assistant_works_without_loaded_image(self):
 +        fresh = modern.ModernWindow()
++        dialog = modern.SetupDialog(fresh)
++        dialog.nearby.setChecked(False)
++        dialog.exec = mock.Mock(
++            return_value=QtWidgets.QDialog.Accepted)
 +        try:
 +            with mock.patch.object(
-+                    modern.SetupDialog, "exec",
-+                    return_value=QtWidgets.QDialog.Accepted):
++                    modern, "SetupDialog",
++                    return_value=dialog):
 +                fresh.setup_assistant()
 +
 +            programmed = [
@@ -1443,26 +1444,6 @@ index 0000000..6768936
 +            ]
 +            self.assertEqual(9, len(programmed))
 +            self.assertTrue(fresh.offline_plan)
-+        finally:
-+            fresh.modified = False
-+            fresh.close()
-+
-+    def test_repeaterbook_button_creates_workspace_before_search(self):
-+        fresh = modern.ModernWindow()
-+        try:
-+            with mock.patch.object(
-+                    modern.RepeaterBookDialog, "exec",
-+                    return_value=QtWidgets.QDialog.Accepted), \
-+                    mock.patch.object(
-+                        modern.RepeaterBookDialog, "params",
-+                        return_value={}), \
-+                    mock.patch.object(QtCore.QThread, "start"):
-+                fresh.find_repeaters()
-+
-+            self.assertIsNotNone(fresh.radio)
-+            self.assertTrue(fresh.offline_plan)
-+            self.assertIsInstance(
-+                fresh.rb_worker, modern.RepeaterBookWorker)
 +        finally:
 +            fresh.modified = False
 +            fresh.close()
@@ -1480,6 +1461,7 @@ index 0000000..6768936
 +
 +    def test_setup_dialog_apply_button_accepts(self):
 +        dialog = modern.SetupDialog()
++        dialog.state.setCurrentIndex(1)
 +        dialog.show()
 +
 +        QtTest.QTest.mouseClick(
@@ -1490,7 +1472,6 @@ index 0000000..6768936
 +
 +    def test_setup_dialog_requires_area_for_nearby_repeaters(self):
 +        dialog = modern.SetupDialog()
-+        dialog.nearby.setChecked(True)
 +        dialog.show()
 +        with mock.patch.object(
 +                QtWidgets.QMessageBox, "warning") as warning:
@@ -1500,6 +1481,19 @@ index 0000000..6768936
 +        warning.assert_called_once()
 +        self.assertNotEqual(
 +            QtWidgets.QDialog.Accepted, dialog.result())
++        dialog.reject()
++
++    def test_setup_local_controls_are_ready_and_use_miles(self):
++        dialog = modern.SetupDialog()
++
++        self.assertTrue(dialog.nearby.isChecked())
++        self.assertTrue(dialog.location_box.isEnabled())
++        self.assertTrue(dialog.country.isEnabled())
++        self.assertTrue(dialog.state.isEnabled())
++        self.assertEqual(" mi", dialog.distance.suffix())
++        self.assertEqual(50, dialog.distance.value())
++        dialog.state.setCurrentIndex(1)
++        self.assertEqual("80", dialog.repeater_params()["dist"])
 +        dialog.reject()
 +
 +    def test_setup_assistant_fetches_and_applies_local_repeaters(self):

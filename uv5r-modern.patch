@@ -1,9 +1,9 @@
 diff --git a/chirp/modern.py b/chirp/modern.py
 new file mode 100644
-index 0000000..7e4ce2b
+index 0000000..6c565af
 --- /dev/null
 +++ b/chirp/modern.py
-@@ -0,0 +1,845 @@
+@@ -0,0 +1,876 @@
 +"""Modern UV-5R-focused desktop interface backed by CHIRP drivers."""
 +
 +import sys
@@ -13,7 +13,7 @@ index 0000000..7e4ce2b
 +from serial.tools import list_ports
 +from PySide6 import QtCore, QtGui, QtWidgets
 +
-+from chirp import chirp_common, directory
++from chirp import chirp_common, directory, memmap
 +from chirp.drivers import uv5r
 +from chirp.sources import repeaterbook
 +from chirp import uv5r_setup
@@ -300,6 +300,7 @@ index 0000000..7e4ce2b
 +        super().__init__()
 +        self.radio = None
 +        self.filename = None
++        self.offline_plan = False
 +        self.modified = False
 +        self._loading = False
 +        self.setWindowTitle("CHIRP Modern · Baofeng UV-5R")
@@ -394,6 +395,7 @@ index 0000000..7e4ce2b
 +        self.search.textChanged.connect(self.apply_filter)
 +        tools.addWidget(self.search, 1)
 +        delete = QtWidgets.QPushButton("Delete selected")
++        self.delete_button = delete
 +        delete.setProperty("danger", True)
 +        delete.clicked.connect(self.delete_selected)
 +        tools.addWidget(delete)
@@ -489,6 +491,18 @@ index 0000000..7e4ce2b
 +        self.run_radio("download")
 +
 +    def upload_radio(self):
++        if not self.radio:
++            QtWidgets.QMessageBox.information(
++                self, "Nothing to upload",
++                "Download from your UV-5R or open a radio image first.")
++            return
++        if self.offline_plan:
++            QtWidgets.QMessageBox.warning(
++                self, "Download required",
++                "This is an offline planning image. Download from your "
++                "actual UV-5R before uploading so its firmware-specific "
++                "settings are preserved.")
++            return
 +        try:
 +            self.commit_table()
 +        except (TypeError, ValueError) as error:
@@ -512,6 +526,7 @@ index 0000000..7e4ce2b
 +        self.radio = radio
 +        if operation == "download":
 +            self.filename = None
++            self.offline_plan = False
 +            self.load_table()
 +            self.modified = True
 +            self.statusBar().showMessage(
@@ -538,6 +553,8 @@ index 0000000..7e4ce2b
 +        try:
 +            self.radio = directory.get_radio_by_image(filename)
 +            self.filename = filename
++            self.offline_plan = bool(
++                self.radio.metadata.get("uv5r_modern_offline_plan"))
 +            self.modified = False
 +            self.load_table()
 +            self.update_state()
@@ -547,8 +564,7 @@ index 0000000..7e4ce2b
 +                                           str(error))
 +
 +    def save_image(self):
-+        if not self.radio:
-+            return
++        self.ensure_workspace()
 +        try:
 +            self.commit_table()
 +        except (TypeError, ValueError) as error:
@@ -657,15 +673,10 @@ index 0000000..7e4ce2b
 +                self.radio.set_memory(memory)
 +
 +    def setup_assistant(self):
-+        if not self.radio:
-+            QtWidgets.QMessageBox.information(
-+                self, "Download first",
-+                "Download from your UV‑5R or open an image before adding "
-+                "channels.")
-+            return
 +        dialog = SetupDialog(self)
 +        if dialog.exec() != QtWidgets.QDialog.Accepted:
 +            return
++        self.ensure_workspace()
 +        try:
 +            self.commit_table()
 +        except (TypeError, ValueError) as error:
@@ -695,15 +706,10 @@ index 0000000..7e4ce2b
 +            "Setup assistant prepared %d channels" % len(planned))
 +
 +    def find_repeaters(self):
-+        if not self.radio:
-+            QtWidgets.QMessageBox.information(
-+                self, "Download first",
-+                "Download from your UV‑5R or open an image before searching "
-+                "for repeaters.")
-+            return
 +        dialog = RepeaterBookDialog(self)
 +        if dialog.exec() != QtWidgets.QDialog.Accepted:
 +            return
++        self.ensure_workspace()
 +        try:
 +            self.commit_table()
 +        except (TypeError, ValueError) as error:
@@ -765,8 +771,7 @@ index 0000000..7e4ce2b
 +            self, "RepeaterBook lookup failed", details)
 +
 +    def add_channel(self):
-+        if not self.radio:
-+            return
++        self.ensure_workspace()
 +        for row in range(128):
 +            if not self.table.item(row, 2).text().strip():
 +                self.table.selectRow(row)
@@ -777,8 +782,16 @@ index 0000000..7e4ce2b
 +            self, "Radio full", "The UV‑5R limit is 128 channels.")
 +
 +    def delete_selected(self):
++        if not self.radio:
++            QtWidgets.QMessageBox.information(
++                self, "Nothing to delete",
++                "There are no channels in the workspace yet.")
++            return
 +        rows = {index.row() for index in self.table.selectedIndexes()}
 +        if not rows:
++            QtWidgets.QMessageBox.information(
++                self, "Select a channel",
++                "Select one or more channel rows to delete.")
 +            return
 +        self._loading = True
 +        for row in rows:
@@ -810,15 +823,33 @@ index 0000000..7e4ce2b
 +                not self.radio.get_memory(row).empty for row in range(128))
 +        self.channel_metric.setText("%d / 128" % programmed)
 +        self.radio_metric.setText(
-+            "%s %s" % (self.radio.VENDOR, self.radio.MODEL)
++            ("%s %s (offline)" % (self.radio.VENDOR, self.radio.MODEL)
++             if self.offline_plan else
++             "%s %s" % (self.radio.VENDOR, self.radio.MODEL))
 +            if loaded else "Not loaded")
 +        self.change_metric.setText("Unsaved" if self.modified else "Saved")
-+        self.save_button.setEnabled(loaded)
-+        self.upload_button.setEnabled(loaded)
-+        self.repeaterbook_button.setEnabled(loaded)
-+        self.assistant_button.setEnabled(loaded)
-+        self.add_button.setEnabled(loaded)
++        self.save_button.setEnabled(True)
++        self.upload_button.setEnabled(True)
++        self.repeaterbook_button.setEnabled(True)
++        self.assistant_button.setEnabled(True)
++        self.add_button.setEnabled(True)
++        self.delete_button.setEnabled(True)
 +        self.download_button.setEnabled(True)
++
++    def ensure_workspace(self):
++        if self.radio:
++            return self.radio
++        data = b"\xFF" * 0x1948
++        self.radio = uv5r.BaofengUV5R(memmap.MemoryMapBytes(data))
++        self.radio.metadata = {"uv5r_modern_offline_plan": True}
++        self.filename = None
++        self.offline_plan = True
++        self.modified = True
++        self.load_table()
++        self.update_state()
++        self.statusBar().showMessage(
++            "Created a blank offline UV-5R planning workspace")
++        return self.radio
 +
 +    def confirm_discard_changes(self, message):
 +        if not self.modified:
@@ -1064,17 +1095,18 @@ index 0000000..6d4a4ba
 +    main()
 diff --git a/tests/unit/test_modern.py b/tests/unit/test_modern.py
 new file mode 100644
-index 0000000..8d234a1
+index 0000000..a738d23
 --- /dev/null
 +++ b/tests/unit/test_modern.py
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,235 @@
 +import os
++import tempfile
 +import unittest
 +from unittest import mock
 +
 +os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 +
-+from PySide6 import QtWidgets
++from PySide6 import QtCore, QtWidgets
 +
 +from chirp import chirp_common
 +from chirp import modern
@@ -1203,6 +1235,101 @@ index 0000000..8d234a1
 +        self.window.commit_table()
 +
 +        self.assertEqual("off", self.radio.memories[1].duplex)
++
++    def test_all_action_buttons_are_enabled_without_image(self):
++        fresh = modern.ModernWindow()
++        try:
++            buttons = (
++                fresh.download_button,
++                fresh.upload_button,
++                fresh.save_button,
++                fresh.repeaterbook_button,
++                fresh.assistant_button,
++                fresh.add_button,
++                fresh.delete_button,
++            )
++            self.assertTrue(all(button.isEnabled() for button in buttons))
++        finally:
++            fresh.close()
++
++    def test_add_channel_creates_offline_workspace(self):
++        fresh = modern.ModernWindow()
++        try:
++            with mock.patch.object(fresh.table, "editItem"):
++                fresh.add_channel()
++
++            self.assertIsNotNone(fresh.radio)
++            self.assertTrue(fresh.offline_plan)
++            self.assertTrue(fresh.modified)
++            self.assertIn("offline", fresh.radio_metric.text().lower())
++        finally:
++            fresh.modified = False
++            fresh.close()
++
++    def test_offline_workspace_marker_survives_save(self):
++        fresh = modern.ModernWindow()
++        try:
++            radio = fresh.ensure_workspace()
++            with tempfile.TemporaryDirectory() as tempdir:
++                filename = os.path.join(tempdir, "offline.img")
++                radio.save(filename)
++                reopened = modern.directory.get_radio_by_image(filename)
++
++            self.assertTrue(
++                reopened.metadata["uv5r_modern_offline_plan"])
++        finally:
++            fresh.modified = False
++            fresh.close()
++
++    def test_setup_assistant_works_without_loaded_image(self):
++        fresh = modern.ModernWindow()
++        try:
++            with mock.patch.object(
++                    modern.SetupDialog, "exec",
++                    return_value=QtWidgets.QDialog.Accepted):
++                fresh.setup_assistant()
++
++            programmed = [
++                fresh.radio.get_memory(number)
++                for number in range(128)
++                if not fresh.radio.get_memory(number).empty
++            ]
++            self.assertEqual(9, len(programmed))
++            self.assertTrue(fresh.offline_plan)
++        finally:
++            fresh.modified = False
++            fresh.close()
++
++    def test_repeaterbook_button_creates_workspace_before_search(self):
++        fresh = modern.ModernWindow()
++        try:
++            with mock.patch.object(
++                    modern.RepeaterBookDialog, "exec",
++                    return_value=QtWidgets.QDialog.Accepted), \
++                    mock.patch.object(
++                        modern.RepeaterBookDialog, "params",
++                        return_value={}), \
++                    mock.patch.object(QtCore.QThread, "start"):
++                fresh.find_repeaters()
++
++            self.assertIsNotNone(fresh.radio)
++            self.assertTrue(fresh.offline_plan)
++            self.assertIsInstance(
++                fresh.rb_worker, modern.RepeaterBookWorker)
++        finally:
++            fresh.modified = False
++            fresh.close()
++
++    def test_upload_without_image_explains_prerequisite(self):
++        fresh = modern.ModernWindow()
++        try:
++            with mock.patch.object(
++                    QtWidgets.QMessageBox, "information") as information:
++                fresh.upload_radio()
++
++            information.assert_called_once()
++        finally:
++            fresh.close()
 +
 +
 +if __name__ == "__main__":

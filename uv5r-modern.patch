@@ -1,11 +1,13 @@
 diff --git a/chirp/modern.py b/chirp/modern.py
 new file mode 100644
-index 0000000..65bb170
+index 0000000..32c589c
 --- /dev/null
 +++ b/chirp/modern.py
-@@ -0,0 +1,1024 @@
+@@ -0,0 +1,1035 @@
 +"""Modern UV-5R-focused desktop interface backed by CHIRP drivers."""
 +
++import builtins
++import gettext
 +import sys
 +import traceback
 +
@@ -17,6 +19,15 @@ index 0000000..65bb170
 +from chirp.drivers import uv5r
 +from chirp.sources import repeaterbook
 +from chirp import uv5r_setup
++
++
++def install_translation():
++    """Provide CHIRP's conventional global translation function."""
++    if not hasattr(builtins, "_"):
++        builtins._ = gettext.gettext
++
++
++install_translation()
 +
 +
 +APP_STYLE = """
@@ -1243,11 +1254,12 @@ index 0000000..6d4a4ba
 +    main()
 diff --git a/tests/unit/test_modern.py b/tests/unit/test_modern.py
 new file mode 100644
-index 0000000..49c07ed
+index 0000000..ccb8827
 --- /dev/null
 +++ b/tests/unit/test_modern.py
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,311 @@
 +import os
++import builtins
 +import tempfile
 +import unittest
 +from unittest import mock
@@ -1537,6 +1549,22 @@ index 0000000..49c07ed
 +        finally:
 +            fresh.modified = False
 +            fresh.close()
++
++    def test_modern_entrypoint_installs_chirp_translation(self):
++        original = getattr(builtins, "_", None)
++        try:
++            if hasattr(builtins, "_"):
++                del builtins._
++            modern.install_translation()
++            self.assertEqual(
++                "No results!", builtins._("No results!"))
++        finally:
++            if original is None:
++                if hasattr(builtins, "_"):
++                    del builtins._
++                modern.install_translation()
++            else:
++                builtins._ = original
 +
 +
 +if __name__ == "__main__":

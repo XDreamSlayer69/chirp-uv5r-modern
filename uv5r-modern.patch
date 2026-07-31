@@ -1,9 +1,9 @@
 diff --git a/chirp/modern.py b/chirp/modern.py
 new file mode 100644
-index 0000000..59680f3
+index 0000000..65bb170
 --- /dev/null
 +++ b/chirp/modern.py
-@@ -0,0 +1,1021 @@
+@@ -0,0 +1,1024 @@
 +"""Modern UV-5R-focused desktop interface backed by CHIRP drivers."""
 +
 +import sys
@@ -192,6 +192,9 @@ index 0000000..59680f3
 +        location.addRow("Country", self.country)
 +        self.state = QtWidgets.QComboBox()
 +        location.addRow("State / province", self.state)
++        self.city = QtWidgets.QLineEdit()
++        self.city.setPlaceholderText("Optional, e.g. Wilmington")
++        location.addRow("City", self.city)
 +        self.latitude = QtWidgets.QLineEdit()
 +        self.latitude.setPlaceholderText("Optional, e.g. 40.7128")
 +        location.addRow("Latitude", self.latitude)
@@ -263,7 +266,7 @@ index 0000000..59680f3
 +            "dist": (
 +                str(round(self.distance.value() * 1.609344))
 +                if self.distance.value() else ""),
-+            "filter": "",
++            "filter": self.city.text().strip(),
 +            "bands": [],
 +            "modes": ["FM"],
 +            "service": "",
@@ -1240,10 +1243,10 @@ index 0000000..6d4a4ba
 +    main()
 diff --git a/tests/unit/test_modern.py b/tests/unit/test_modern.py
 new file mode 100644
-index 0000000..c9c429d
+index 0000000..49c07ed
 --- /dev/null
 +++ b/tests/unit/test_modern.py
-@@ -0,0 +1,291 @@
+@@ -0,0 +1,294 @@
 +import os
 +import tempfile
 +import unittest
@@ -1493,7 +1496,10 @@ index 0000000..c9c429d
 +        self.assertEqual(" mi", dialog.distance.suffix())
 +        self.assertEqual(50, dialog.distance.value())
 +        dialog.state.setCurrentIndex(1)
++        dialog.city.setText("Fairbanks")
 +        self.assertEqual("80", dialog.repeater_params()["dist"])
++        self.assertEqual(
++            "Fairbanks", dialog.repeater_params()["filter"])
 +        dialog.reject()
 +
 +    def test_setup_assistant_fetches_and_applies_local_repeaters(self):

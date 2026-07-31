@@ -44,7 +44,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install --upgrade pip
           python -m pip install `
-            wxPython==4.2.5 `
+            PySide6 `
             pyserial `
             requests `
             pywin32 `
@@ -69,51 +69,35 @@ jobs:
             --clean `
             --windowed `
             --onedir `
-            --name CHIRP-UV5R-Modern `
-            --collect-all chirp `
-            --collect-all wx `
+            --name CHIRP-Modern-UV5R `
             --add-data "chirp/share;chirp/share" `
             --add-data "chirp/stock_configs;chirp/stock_configs" `
             --add-data "chirp/locale;chirp/locale" `
             --hidden-import chirp.share `
             --hidden-import chirp.stock_configs `
-            --hidden-import wx.adv `
-            --hidden-import wx._xml `
-            --hidden-import wx._richtext `
-            chirpwx.py
+            --hidden-import chirp.drivers.uv5r `
+            --hidden-import chirp.drivers.baofeng_common `
+            chirp_modern.py
 
       - name: Verify executable starts
         working-directory: chirp-source
         shell: pwsh
         run: |
-          $exe = Resolve-Path "dist/CHIRP-UV5R-Modern/CHIRP-UV5R-Modern.exe"
+          $exe = Resolve-Path "dist/CHIRP-Modern-UV5R/CHIRP-Modern-UV5R.exe"
           if ((Get-Item $exe).Length -lt 100000) {
             throw "Built executable is unexpectedly small"
           }
-          $wxXml = Get-ChildItem `
-            -Path "dist/CHIRP-UV5R-Modern" `
-            -Recurse `
-            -Filter "*_xml*.pyd"
-          $wxRichText = Get-ChildItem `
-            -Path "dist/CHIRP-UV5R-Modern" `
-            -Recurse `
-            -Filter "*_richtext*.pyd"
-          if (-not $wxXml) {
-            throw "wxPython XML extension is missing from the package"
-          }
-          if (-not $wxRichText) {
-            throw "wxPython RichText extension is missing from the package"
-          }
           $resources = @(
-            "dist/CHIRP-UV5R-Modern/_internal/chirp/share/chirp.ico",
-            "dist/CHIRP-UV5R-Modern/_internal/chirp/share/plus-icon.png",
-            "dist/CHIRP-UV5R-Modern/_internal/chirp/share/welcome_screen.png"
+            "dist/CHIRP-Modern-UV5R/_internal/chirp/share/chirp.ico",
+            "dist/CHIRP-Modern-UV5R/_internal/chirp/share/plus-icon.png",
+            "dist/CHIRP-Modern-UV5R/_internal/chirp/share/welcome_screen.png"
           )
           foreach ($resource in $resources) {
             if (-not (Test-Path $resource)) {
               throw "Required CHIRP resource is missing: $resource"
             }
           }
+          $env:QT_QPA_PLATFORM = "offscreen"
           $process = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 12
           if ($process.HasExited -and $process.ExitCode -ne 0) {
@@ -128,13 +112,13 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive `
-            -Path "dist/CHIRP-UV5R-Modern" `
-            -DestinationPath "CHIRP-UV5R-Modern-Windows.zip"
+            -Path "dist/CHIRP-Modern-UV5R" `
+            -DestinationPath "CHIRP-Modern-UV5R-Windows.zip"
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: CHIRP-UV5R-Modern-Windows
-          path: chirp-source/CHIRP-UV5R-Modern-Windows.zip
+          name: CHIRP-Modern-UV5R-Windows
+          path: chirp-source/CHIRP-Modern-UV5R-Windows.zip
           if-no-files-found: error
           retention-days: 30

@@ -72,6 +72,11 @@ jobs:
             --name CHIRP-UV5R-Modern `
             --collect-all chirp `
             --collect-all wx `
+            --add-data "chirp/share;chirp/share" `
+            --add-data "chirp/stock_configs;chirp/stock_configs" `
+            --add-data "chirp/locale;chirp/locale" `
+            --hidden-import chirp.share `
+            --hidden-import chirp.stock_configs `
             --hidden-import wx.adv `
             --hidden-import wx._xml `
             --hidden-import wx._richtext `
@@ -98,6 +103,16 @@ jobs:
           }
           if (-not $wxRichText) {
             throw "wxPython RichText extension is missing from the package"
+          }
+          $resources = @(
+            "dist/CHIRP-UV5R-Modern/_internal/chirp/share/chirp.ico",
+            "dist/CHIRP-UV5R-Modern/_internal/chirp/share/plus-icon.png",
+            "dist/CHIRP-UV5R-Modern/_internal/chirp/share/welcome_screen.png"
+          )
+          foreach ($resource in $resources) {
+            if (-not (Test-Path $resource)) {
+              throw "Required CHIRP resource is missing: $resource"
+            }
           }
           $process = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 12

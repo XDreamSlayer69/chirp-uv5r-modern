@@ -1,9 +1,9 @@
 diff --git a/chirp/modern.py b/chirp/modern.py
 new file mode 100644
-index 0000000..ce4e3b9
+index 0000000..7e4ce2b
 --- /dev/null
 +++ b/chirp/modern.py
-@@ -0,0 +1,802 @@
+@@ -0,0 +1,845 @@
 +"""Modern UV-5R-focused desktop interface backed by CHIRP drivers."""
 +
 +import sys
@@ -483,10 +483,18 @@ index 0000000..ce4e3b9
 +        self.thread.start()
 +
 +    def download_radio(self):
++        if not self.confirm_discard_changes(
++                "Download and replace the current unsaved image?"):
++            return
 +        self.run_radio("download")
 +
 +    def upload_radio(self):
-+        self.commit_table()
++        try:
++            self.commit_table()
++        except (TypeError, ValueError) as error:
++            QtWidgets.QMessageBox.warning(
++                self, "Invalid channel data", str(error))
++            return
 +        answer = QtWidgets.QMessageBox.warning(
 +            self, "Confirm upload",
 +            "Uploading overwrites the radio. Confirm that you saved a backup.",
@@ -520,6 +528,9 @@ index 0000000..ce4e3b9
 +            self, "Radio communication failed", details)
 +
 +    def open_image(self):
++        if not self.confirm_discard_changes(
++                "Open another image and discard the current unsaved changes?"):
++            return
 +        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
 +            self, "Open CHIRP radio image", "", "CHIRP images (*.img);;All (*)")
 +        if not filename:
@@ -538,18 +549,29 @@ index 0000000..ce4e3b9
 +    def save_image(self):
 +        if not self.radio:
 +            return
-+        self.commit_table()
++        try:
++            self.commit_table()
++        except (TypeError, ValueError) as error:
++            QtWidgets.QMessageBox.warning(
++                self, "Invalid channel data", str(error))
++            return
 +        filename = self.filename
 +        if not filename:
 +            filename, _ = QtWidgets.QFileDialog.getSaveFileName(
 +                self, "Save radio image", "UV5R-backup.img",
 +                "CHIRP images (*.img)")
-+        if filename:
++        if not filename:
++            return
++        try:
 +            self.radio.save(filename)
-+            self.filename = filename
-+            self.modified = False
-+            self.update_state()
-+            self.statusBar().showMessage("Saved %s" % filename)
++        except Exception as error:
++            QtWidgets.QMessageBox.critical(
++                self, "Unable to save image", str(error))
++            return
++        self.filename = filename
++        self.modified = False
++        self.update_state()
++        self.statusBar().showMessage("Saved %s" % filename)
 +
 +    def load_table(self):
 +        self._loading = True
@@ -618,19 +640,20 @@ index 0000000..ce4e3b9
 +    def commit_table(self):
 +        if not self.radio:
 +            return
++        memories = []
 +        for row in range(128):
 +            memory = self.memory_from_row(row)
-+            if memory.empty:
-+                try:
-+                    self.radio.erase_memory(row)
-+                except Exception:
-+                    pass
-+            else:
++            if not memory.empty:
 +                errors = self.radio.validate_memory(memory)
 +                if errors:
 +                    raise ValueError(
 +                        "Channel %d: %s" % (row + 1, "; ".join(
 +                            str(error) for error in errors)))
++            memories.append(memory)
++        for row, memory in enumerate(memories):
++            if memory.empty:
++                self.radio.erase_memory(row)
++            else:
 +                self.radio.set_memory(memory)
 +
 +    def setup_assistant(self):
@@ -642,6 +665,12 @@ index 0000000..ce4e3b9
 +            return
 +        dialog = SetupDialog(self)
 +        if dialog.exec() != QtWidgets.QDialog.Accepted:
++            return
++        try:
++            self.commit_table()
++        except (TypeError, ValueError) as error:
++            QtWidgets.QMessageBox.warning(
++                self, "Invalid channel data", str(error))
 +            return
 +        existing = []
 +        for row in range(128):
@@ -674,6 +703,12 @@ index 0000000..ce4e3b9
 +            return
 +        dialog = RepeaterBookDialog(self)
 +        if dialog.exec() != QtWidgets.QDialog.Accepted:
++            return
++        try:
++            self.commit_table()
++        except (TypeError, ValueError) as error:
++            QtWidgets.QMessageBox.warning(
++                self, "Invalid channel data", str(error))
 +            return
 +        self.progress.setValue(0)
 +        self.progress.show()
@@ -784,6 +819,14 @@ index 0000000..ce4e3b9
 +        self.assistant_button.setEnabled(loaded)
 +        self.add_button.setEnabled(loaded)
 +        self.download_button.setEnabled(True)
++
++    def confirm_discard_changes(self, message):
++        if not self.modified:
++            return True
++        return QtWidgets.QMessageBox.question(
++            self, "Unsaved changes", message,
++            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
++            QtWidgets.QMessageBox.Cancel) == QtWidgets.QMessageBox.Yes
 +
 +    def closeEvent(self, event):
 +        if self.modified:
@@ -1019,6 +1062,151 @@ index 0000000..6d4a4ba
 +
 +if __name__ == "__main__":
 +    main()
+diff --git a/tests/unit/test_modern.py b/tests/unit/test_modern.py
+new file mode 100644
+index 0000000..8d234a1
+--- /dev/null
++++ b/tests/unit/test_modern.py
+@@ -0,0 +1,139 @@
++import os
++import unittest
++from unittest import mock
++
++os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
++
++from PySide6 import QtWidgets
++
++from chirp import chirp_common
++from chirp import modern
++
++
++class Features:
++    valid_power_levels = [
++        chirp_common.PowerLevel("High", watts=5),
++        chirp_common.PowerLevel("Low", watts=1),
++    ]
++
++
++class FakeRadio:
++    VENDOR = "Baofeng"
++    MODEL = "UV-5R"
++
++    def __init__(self):
++        self.memories = {}
++        self.set_calls = []
++        self.erase_calls = []
++        self.saved = []
++
++    def get_memory(self, number):
++        if number in self.memories:
++            return self.memories[number].dupe()
++        memory = chirp_common.Memory()
++        memory.number = number
++        memory.empty = True
++        return memory
++
++    def set_memory(self, memory):
++        self.set_calls.append(memory.number)
++        self.memories[memory.number] = memory.dupe()
++
++    def erase_memory(self, number):
++        self.erase_calls.append(number)
++        self.memories.pop(number, None)
++
++    def validate_memory(self, memory):
++        if not 136_000_000 <= memory.freq <= 520_000_000:
++            return ["Frequency is outside the UV-5R range"]
++        return []
++
++    def get_features(self):
++        return Features()
++
++    def save(self, filename):
++        self.saved.append(filename)
++
++
++def memory(number, name, frequency):
++    result = chirp_common.Memory()
++    result.number = number
++    result.name = name
++    result.freq = frequency
++    result.mode = "FM"
++    result.power = Features.valid_power_levels[0]
++    return result
++
++
++class ModernWindowTest(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
++
++    def setUp(self):
++        self.window = modern.ModernWindow()
++        self.radio = FakeRadio()
++        self.radio.memories[0] = memory(0, "LOCAL", 146_520_000)
++        self.window.radio = self.radio
++        self.window.load_table()
++
++    def tearDown(self):
++        self.window.modified = False
++        self.window.close()
++
++    def test_table_round_trip_updates_radio(self):
++        self.window.table.item(0, 1).setText("UPDATED")
++        self.window.table.item(0, 2).setText("146.940000")
++
++        self.window.commit_table()
++
++        self.assertEqual("UPDATED", self.radio.memories[0].name)
++        self.assertEqual(146_940_000, self.radio.memories[0].freq)
++
++    def test_validation_is_atomic(self):
++        self.window.table.item(0, 1).setText("CHANGED")
++        self.window.table.item(1, 1).setText("INVALID")
++        self.window.table.item(1, 2).setText("900.000000")
++        self.radio.set_calls.clear()
++        self.radio.erase_calls.clear()
++
++        with self.assertRaisesRegex(ValueError, "Channel 2"):
++            self.window.commit_table()
++
++        self.assertEqual([], self.radio.set_calls)
++        self.assertEqual([], self.radio.erase_calls)
++        self.assertEqual("LOCAL", self.radio.memories[0].name)
++
++    def test_download_protects_unsaved_changes(self):
++        self.window.modified = True
++        with mock.patch.object(
++                QtWidgets.QMessageBox, "question",
++                return_value=QtWidgets.QMessageBox.Cancel), \
++                mock.patch.object(self.window, "run_radio") as run_radio:
++            self.window.download_radio()
++
++        run_radio.assert_not_called()
++
++    def test_save_failure_preserves_dirty_state(self):
++        self.window.modified = True
++        self.window.filename = "broken.img"
++        self.radio.save = mock.Mock(side_effect=OSError("disk full"))
++        with mock.patch.object(QtWidgets.QMessageBox, "critical") as critical:
++            self.window.save_image()
++
++        critical.assert_called_once()
++        self.assertTrue(self.window.modified)
++
++    def test_receive_only_channel_round_trip(self):
++        weather = memory(1, "WX1", 162_550_000)
++        weather.duplex = "off"
++        self.radio.memories[1] = weather
++        self.window.load_table()
++
++        self.window.commit_table()
++
++        self.assertEqual("off", self.radio.memories[1].duplex)
++
++
++if __name__ == "__main__":
++    unittest.main()
 diff --git a/tests/unit/test_uv5r_setup.py b/tests/unit/test_uv5r_setup.py
 new file mode 100644
 index 0000000..38f5f7c

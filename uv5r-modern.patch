@@ -1,3 +1,811 @@
+diff --git a/chirp/modern.py b/chirp/modern.py
+new file mode 100644
+index 0000000..ce4e3b9
+--- /dev/null
++++ b/chirp/modern.py
+@@ -0,0 +1,802 @@
++"""Modern UV-5R-focused desktop interface backed by CHIRP drivers."""
++
++import sys
++import traceback
++
++import serial
++from serial.tools import list_ports
++from PySide6 import QtCore, QtGui, QtWidgets
++
++from chirp import chirp_common, directory
++from chirp.drivers import uv5r
++from chirp.sources import repeaterbook
++from chirp import uv5r_setup
++
++
++APP_STYLE = """
++QWidget {
++  background: #0b1020; color: #e8edf7;
++  font-family: "Segoe UI"; font-size: 10pt;
++}
++QMainWindow { background: #0b1020; }
++#Sidebar { background: #10182b; border-right: 1px solid #24304a; }
++#Brand { font-size: 18pt; font-weight: 700; color: #ffffff; }
++#Eyebrow { color: #7f8ca8; font-size: 9pt; font-weight: 600; }
++#PageTitle { font-size: 23pt; font-weight: 700; color: #ffffff; }
++#Card {
++  background: #141e34; border: 1px solid #263552;
++  border-radius: 14px;
++}
++#Metric { color: #ffffff; font-size: 20pt; font-weight: 700; }
++#Muted { color: #8f9bb4; }
++QPushButton {
++  background: #1b2943; border: 1px solid #304363;
++  border-radius: 9px; padding: 9px 14px; font-weight: 600;
++}
++QPushButton:hover { background: #243654; border-color: #4d6791; }
++QPushButton[accent="true"] {
++  background: #3977f6; border-color: #5790ff; color: white;
++}
++QPushButton[accent="true"]:hover { background: #4a84f8; }
++QPushButton[danger="true"] { background: #472232; border-color: #743249; }
++QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
++  background: #0e1728; border: 1px solid #2c3c5b;
++  border-radius: 8px; padding: 8px;
++}
++QTableWidget {
++  background: #10192b; alternate-background-color: #131e32;
++  border: 1px solid #263552; border-radius: 12px;
++  gridline-color: #22304a; selection-background-color: #254d93;
++}
++QHeaderView::section {
++  background: #18243b; color: #aebad1; border: 0;
++  border-right: 1px solid #263552; padding: 10px; font-weight: 650;
++}
++QProgressBar {
++  background: #0e1728; border: 1px solid #263552;
++  border-radius: 6px; text-align: center; height: 12px;
++}
++QProgressBar::chunk { background: #3977f6; border-radius: 5px; }
++QStatusBar { background: #10182b; color: #93a1bc; }
++QScrollBar:vertical { background: #10182b; width: 11px; }
++QScrollBar::handle:vertical { background: #354563; border-radius: 5px; }
++"""
++
++
++def open_serial(port, radio_class=uv5r.BaofengUV5R):
++    pipe = serial.Serial(
++        port=port,
++        baudrate=radio_class.BAUD_RATE,
++        timeout=0.25,
++        rtscts=radio_class.HARDWARE_FLOW,
++    )
++    pipe.rts = radio_class.WANTS_RTS
++    pipe.dtr = radio_class.WANTS_DTR
++    return pipe
++
++
++class RadioWorker(QtCore.QObject):
++    progress = QtCore.Signal(int, str)
++    completed = QtCore.Signal(object)
++    failed = QtCore.Signal(str)
++
++    def __init__(self, operation, port, radio=None):
++        super().__init__()
++        self.operation = operation
++        self.port = port
++        self.radio = radio
++
++    @QtCore.Slot()
++    def run(self):
++        pipe = None
++        try:
++            pipe = open_serial(self.port)
++            if self.operation == "download":
++                radio = uv5r.BaofengUV5R(pipe)
++            else:
++                radio = self.radio
++                radio.pipe = pipe
++
++            def status(value):
++                maximum = value.max or 1
++                percent = int(value.cur / maximum * 100)
++                self.progress.emit(percent, value.msg)
++
++            radio.status_fn = status
++            getattr(radio, "sync_in" if self.operation == "download"
++                    else "sync_out")()
++            radio.pipe = None
++            self.completed.emit(radio)
++        except Exception as error:
++            self.failed.emit("%s\n\n%s" % (error, traceback.format_exc()))
++        finally:
++            if pipe:
++                try:
++                    pipe.close()
++                except Exception:
++                    pass
++
++
++class RepeaterBookWorker(QtCore.QObject):
++    progress = QtCore.Signal(int, str)
++    completed = QtCore.Signal(object)
++    failed = QtCore.Signal(str)
++
++    def __init__(self, params):
++        super().__init__()
++        self.params = params
++
++    @QtCore.Slot()
++    def run(self):
++        source = repeaterbook.RepeaterBook()
++        worker = self
++
++        class Status:
++            def send_status(self, message, percent):
++                worker.progress.emit(int(percent), message)
++
++            def send_end(self):
++                worker.completed.emit(source._memories)
++
++            def send_fail(self, reason):
++                worker.failed.emit(str(reason))
++
++            set_fail = send_fail
++
++        try:
++            source.do_fetch(Status(), dict(self.params))
++        except Exception as error:
++            self.failed.emit("%s\n\n%s" % (error, traceback.format_exc()))
++
++
++class SetupDialog(QtWidgets.QDialog):
++    def __init__(self, parent=None):
++        super().__init__(parent)
++        self.setWindowTitle("UV-5R Setup Assistant")
++        self.setMinimumWidth(480)
++        layout = QtWidgets.QVBoxLayout(self)
++        title = QtWidgets.QLabel("Build a practical starter lineup")
++        title.setObjectName("PageTitle")
++        layout.addWidget(title)
++        text = QtWidgets.QLabel(
++            "Add common analog channels safely. NOAA channels are always "
++            "receive-only and the 128-channel limit is enforced.")
++        text.setWordWrap(True)
++        text.setObjectName("Muted")
++        layout.addWidget(text)
++        self.calling = QtWidgets.QCheckBox(
++            "2 m and 70 cm amateur calling channels")
++        self.calling.setChecked(True)
++        self.noaa = QtWidgets.QCheckBox(
++            "All seven NOAA Weather Radio channels (receive-only)")
++        self.noaa.setChecked(True)
++        layout.addSpacing(12)
++        layout.addWidget(self.calling)
++        layout.addWidget(self.noaa)
++        buttons = QtWidgets.QDialogButtonBox(
++            QtWidgets.QDialogButtonBox.Cancel |
++            QtWidgets.QDialogButtonBox.Apply)
++        buttons.accepted.connect(self.accept)
++        buttons.rejected.connect(self.reject)
++        layout.addSpacing(16)
++        layout.addWidget(buttons)
++
++
++class RepeaterBookDialog(QtWidgets.QDialog):
++    def __init__(self, parent=None):
++        super().__init__(parent)
++        self.setWindowTitle("Find analog repeaters")
++        self.setMinimumWidth(520)
++        layout = QtWidgets.QVBoxLayout(self)
++        title = QtWidgets.QLabel("RepeaterBook")
++        title.setObjectName("PageTitle")
++        layout.addWidget(title)
++        help_text = QtWidgets.QLabel(
++            "Search RepeaterBook, then merge compatible analog repeaters "
++            "into this UV‑5R image. Digital-only and out-of-range results "
++            "are removed automatically.")
++        help_text.setWordWrap(True)
++        help_text.setObjectName("Muted")
++        layout.addWidget(help_text)
++
++        form = QtWidgets.QFormLayout()
++        form.setSpacing(12)
++        self.country = QtWidgets.QComboBox()
++        self.country.addItems(repeaterbook.COUNTRIES)
++        self.country.setCurrentText("United States")
++        self.country.currentTextChanged.connect(self.update_states)
++        form.addRow("Country", self.country)
++        self.state = QtWidgets.QComboBox()
++        form.addRow("State / province", self.state)
++        self.latitude = QtWidgets.QLineEdit()
++        self.latitude.setPlaceholderText("Optional, e.g. 40.7128")
++        form.addRow("Latitude", self.latitude)
++        self.longitude = QtWidgets.QLineEdit()
++        self.longitude.setPlaceholderText("Optional, e.g. -74.0060")
++        form.addRow("Longitude", self.longitude)
++        self.distance = QtWidgets.QSpinBox()
++        self.distance.setRange(0, 1000)
++        self.distance.setSuffix(" km")
++        self.distance.setSpecialValueText("No distance limit")
++        form.addRow("Maximum distance", self.distance)
++        self.search = QtWidgets.QLineEdit()
++        self.search.setPlaceholderText("Optional city, county, callsign…")
++        form.addRow("Text filter", self.search)
++        self.open_only = QtWidgets.QCheckBox("Open repeaters only")
++        self.open_only.setChecked(True)
++        form.addRow("", self.open_only)
++        layout.addSpacing(12)
++        layout.addLayout(form)
++        self.update_states()
++
++        buttons = QtWidgets.QDialogButtonBox(
++            QtWidgets.QDialogButtonBox.Cancel |
++            QtWidgets.QDialogButtonBox.Ok)
++        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText(
++            "Find repeaters")
++        buttons.accepted.connect(self.validate_and_accept)
++        buttons.rejected.connect(self.reject)
++        layout.addSpacing(14)
++        layout.addWidget(buttons)
++
++    def update_states(self):
++        country = self.country.currentText()
++        self.state.clear()
++        states = repeaterbook.STATES.get(country, ["All"])
++        self.state.addItems(states)
++
++    def validate_and_accept(self):
++        lat = self.latitude.text().strip()
++        lon = self.longitude.text().strip()
++        if bool(lat) != bool(lon):
++            QtWidgets.QMessageBox.warning(
++                self, "Incomplete coordinates",
++                "Enter both latitude and longitude, or leave both blank.")
++            return
++        try:
++            if lat:
++                latitude = float(lat)
++                longitude = float(lon)
++                if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
++                    raise ValueError
++        except ValueError:
++            QtWidgets.QMessageBox.warning(
++                self, "Invalid coordinates",
++                "Latitude must be −90 to 90 and longitude −180 to 180.")
++            return
++        self.accept()
++
++    def params(self):
++        return {
++            "country": self.country.currentText(),
++            "state": self.state.currentText(),
++            "lat": self.latitude.text().strip(),
++            "lon": self.longitude.text().strip(),
++            "dist": str(self.distance.value() or ""),
++            "filter": self.search.text().strip(),
++            "bands": [],
++            "modes": ["FM"],
++            "service": "",
++            "service_display": "Amateur",
++            "fmconv": False,
++            "openonly": self.open_only.isChecked(),
++            "cached": False,
++        }
++
++
++class ModernWindow(QtWidgets.QMainWindow):
++    COLUMNS = (
++        "Channel", "Name", "Receive (MHz)", "Duplex", "Offset (MHz)",
++        "Tone mode", "Tone", "Bandwidth", "Power", "Scan",
++    )
++
++    def __init__(self):
++        super().__init__()
++        self.radio = None
++        self.filename = None
++        self.modified = False
++        self._loading = False
++        self.setWindowTitle("CHIRP Modern · Baofeng UV-5R")
++        self.resize(1380, 850)
++        self.setMinimumSize(1050, 680)
++        self._build_ui()
++        self.refresh_ports()
++        self.update_state()
++
++    def _build_ui(self):
++        root = QtWidgets.QWidget()
++        self.setCentralWidget(root)
++        outer = QtWidgets.QHBoxLayout(root)
++        outer.setContentsMargins(0, 0, 0, 0)
++        outer.setSpacing(0)
++
++        sidebar = QtWidgets.QFrame()
++        sidebar.setObjectName("Sidebar")
++        sidebar.setFixedWidth(250)
++        side = QtWidgets.QVBoxLayout(sidebar)
++        side.setContentsMargins(22, 28, 22, 24)
++        brand = QtWidgets.QLabel("CHIRP Modern")
++        brand.setObjectName("Brand")
++        side.addWidget(brand)
++        sub = QtWidgets.QLabel("UV‑5R COMMAND CENTER")
++        sub.setObjectName("Eyebrow")
++        side.addWidget(sub)
++        side.addSpacing(34)
++        self.port = QtWidgets.QComboBox()
++        side.addWidget(QtWidgets.QLabel("Programming cable"))
++        side.addWidget(self.port)
++        refresh = QtWidgets.QPushButton("Refresh COM ports")
++        refresh.clicked.connect(self.refresh_ports)
++        side.addWidget(refresh)
++        side.addSpacing(22)
++        self.download_button = QtWidgets.QPushButton("Download from radio")
++        self.download_button.setProperty("accent", True)
++        self.download_button.clicked.connect(self.download_radio)
++        side.addWidget(self.download_button)
++        self.upload_button = QtWidgets.QPushButton("Upload to radio")
++        self.upload_button.clicked.connect(self.upload_radio)
++        side.addWidget(self.upload_button)
++        side.addSpacing(14)
++        open_button = QtWidgets.QPushButton("Open radio image")
++        open_button.clicked.connect(self.open_image)
++        side.addWidget(open_button)
++        self.save_button = QtWidgets.QPushButton("Save radio image")
++        self.save_button.clicked.connect(self.save_image)
++        side.addWidget(self.save_button)
++        side.addStretch()
++        safety = QtWidgets.QLabel(
++            "Always download and save a backup before uploading changes.")
++        safety.setWordWrap(True)
++        safety.setObjectName("Muted")
++        side.addWidget(safety)
++        outer.addWidget(sidebar)
++
++        content = QtWidgets.QWidget()
++        main = QtWidgets.QVBoxLayout(content)
++        main.setContentsMargins(30, 26, 30, 22)
++        header = QtWidgets.QHBoxLayout()
++        titles = QtWidgets.QVBoxLayout()
++        eye = QtWidgets.QLabel("RADIO PROGRAMMING WORKSPACE")
++        eye.setObjectName("Eyebrow")
++        titles.addWidget(eye)
++        page = QtWidgets.QLabel("Memory channels")
++        page.setObjectName("PageTitle")
++        titles.addWidget(page)
++        header.addLayout(titles)
++        header.addStretch()
++        self.repeaterbook_button = QtWidgets.QPushButton("RepeaterBook")
++        self.repeaterbook_button.clicked.connect(self.find_repeaters)
++        header.addWidget(self.repeaterbook_button)
++        self.assistant_button = QtWidgets.QPushButton("Setup assistant")
++        self.assistant_button.setProperty("accent", True)
++        self.assistant_button.clicked.connect(self.setup_assistant)
++        header.addWidget(self.assistant_button)
++        self.add_button = QtWidgets.QPushButton("Add channel")
++        self.add_button.clicked.connect(self.add_channel)
++        header.addWidget(self.add_button)
++        main.addLayout(header)
++
++        cards = QtWidgets.QHBoxLayout()
++        self.channel_metric = self._metric(cards, "PROGRAMMED", "0")
++        self.radio_metric = self._metric(cards, "RADIO IMAGE", "Not loaded")
++        self.change_metric = self._metric(cards, "CHANGES", "Saved")
++        main.addLayout(cards)
++
++        tools = QtWidgets.QHBoxLayout()
++        self.search = QtWidgets.QLineEdit()
++        self.search.setPlaceholderText("Search channel name or frequency…")
++        self.search.textChanged.connect(self.apply_filter)
++        tools.addWidget(self.search, 1)
++        delete = QtWidgets.QPushButton("Delete selected")
++        delete.setProperty("danger", True)
++        delete.clicked.connect(self.delete_selected)
++        tools.addWidget(delete)
++        main.addLayout(tools)
++
++        self.table = QtWidgets.QTableWidget(128, len(self.COLUMNS))
++        self.table.setHorizontalHeaderLabels(self.COLUMNS)
++        self.table.setAlternatingRowColors(True)
++        self.table.setSelectionBehavior(
++            QtWidgets.QAbstractItemView.SelectRows)
++        self.table.setSelectionMode(
++            QtWidgets.QAbstractItemView.ExtendedSelection)
++        self.table.verticalHeader().setVisible(False)
++        self.table.horizontalHeader().setStretchLastSection(True)
++        self.table.horizontalHeader().setSectionResizeMode(
++            1, QtWidgets.QHeaderView.Stretch)
++        self.table.itemChanged.connect(self.cell_changed)
++        main.addWidget(self.table, 1)
++
++        self.progress = QtWidgets.QProgressBar()
++        self.progress.hide()
++        main.addWidget(self.progress)
++        outer.addWidget(content, 1)
++        self.statusBar().showMessage("Connect a cable and download your UV‑5R")
++
++    def _metric(self, layout, label, value):
++        card = QtWidgets.QFrame()
++        card.setObjectName("Card")
++        box = QtWidgets.QVBoxLayout(card)
++        box.setContentsMargins(18, 13, 18, 13)
++        caption = QtWidgets.QLabel(label)
++        caption.setObjectName("Eyebrow")
++        box.addWidget(caption)
++        metric = QtWidgets.QLabel(value)
++        metric.setObjectName("Metric")
++        box.addWidget(metric)
++        layout.addWidget(card, 1)
++        return metric
++
++    def refresh_ports(self):
++        current = self.port.currentData()
++        self.port.clear()
++        for info in sorted(list_ports.comports(), key=lambda item: item.device):
++            self.port.addItem("%s · %s" % (info.device, info.description),
++                              info.device)
++        if current:
++            index = self.port.findData(current)
++            if index >= 0:
++                self.port.setCurrentIndex(index)
++        if not self.port.count():
++            self.port.addItem("No programming cable found", None)
++
++    def confirm_radio_ready(self, operation):
++        prompt = getattr(uv5r.BaofengUV5R.get_prompts(),
++                         "pre_%s" % operation)
++        return QtWidgets.QMessageBox.question(
++            self, "%s UV‑5R" % operation.title(), prompt,
++            QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel
++        ) == QtWidgets.QMessageBox.Ok
++
++    def run_radio(self, operation):
++        port = self.port.currentData()
++        if not port:
++            QtWidgets.QMessageBox.warning(
++                self, "No cable", "Connect a programming cable first.")
++            return
++        if operation == "upload" and not self.radio:
++            return
++        if not self.confirm_radio_ready(operation):
++            return
++        self.progress.setValue(0)
++        self.progress.show()
++        self.download_button.setEnabled(False)
++        self.upload_button.setEnabled(False)
++        self.thread = QtCore.QThread(self)
++        self.worker = RadioWorker(operation, port, self.radio)
++        self.worker.moveToThread(self.thread)
++        self.thread.started.connect(self.worker.run)
++        self.worker.progress.connect(self.radio_progress)
++        self.worker.completed.connect(
++            lambda radio: self.radio_complete(operation, radio))
++        self.worker.failed.connect(self.radio_failed)
++        self.worker.completed.connect(self.thread.quit)
++        self.worker.failed.connect(self.thread.quit)
++        self.thread.finished.connect(self.worker.deleteLater)
++        self.thread.finished.connect(self.thread.deleteLater)
++        self.thread.start()
++
++    def download_radio(self):
++        self.run_radio("download")
++
++    def upload_radio(self):
++        self.commit_table()
++        answer = QtWidgets.QMessageBox.warning(
++            self, "Confirm upload",
++            "Uploading overwrites the radio. Confirm that you saved a backup.",
++            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
++            QtWidgets.QMessageBox.Cancel)
++        if answer == QtWidgets.QMessageBox.Yes:
++            self.run_radio("upload")
++
++    def radio_progress(self, value, message):
++        self.progress.setValue(value)
++        self.statusBar().showMessage(message)
++
++    def radio_complete(self, operation, radio):
++        self.progress.hide()
++        self.radio = radio
++        if operation == "download":
++            self.filename = None
++            self.load_table()
++            self.modified = True
++            self.statusBar().showMessage(
++                "Downloaded successfully · save a backup before editing")
++        else:
++            self.modified = False
++            self.statusBar().showMessage("Upload completed successfully")
++        self.update_state()
++
++    def radio_failed(self, details):
++        self.progress.hide()
++        self.update_state()
++        QtWidgets.QMessageBox.critical(
++            self, "Radio communication failed", details)
++
++    def open_image(self):
++        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
++            self, "Open CHIRP radio image", "", "CHIRP images (*.img);;All (*)")
++        if not filename:
++            return
++        try:
++            self.radio = directory.get_radio_by_image(filename)
++            self.filename = filename
++            self.modified = False
++            self.load_table()
++            self.update_state()
++            self.statusBar().showMessage("Opened %s" % filename)
++        except Exception as error:
++            QtWidgets.QMessageBox.critical(self, "Unable to open image",
++                                           str(error))
++
++    def save_image(self):
++        if not self.radio:
++            return
++        self.commit_table()
++        filename = self.filename
++        if not filename:
++            filename, _ = QtWidgets.QFileDialog.getSaveFileName(
++                self, "Save radio image", "UV5R-backup.img",
++                "CHIRP images (*.img)")
++        if filename:
++            self.radio.save(filename)
++            self.filename = filename
++            self.modified = False
++            self.update_state()
++            self.statusBar().showMessage("Saved %s" % filename)
++
++    def load_table(self):
++        self._loading = True
++        for row in range(128):
++            memory = self.radio.get_memory(row)
++            values = self.memory_values(memory)
++            for column, value in enumerate(values):
++                item = QtWidgets.QTableWidgetItem(value)
++                if column == 0:
++                    item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
++                self.table.setItem(row, column, item)
++            self.table.setRowHidden(row, False)
++        self._loading = False
++        self.update_state()
++
++    @staticmethod
++    def memory_values(memory):
++        if memory.empty:
++            return (str(memory.number + 1), "", "", "", "", "", "",
++                    "FM", "High", "")
++        power = str(memory.power) if memory.power else "High"
++        tone = ""
++        if memory.tmode in ("Tone", "TSQL"):
++            tone = "%.1f" % (memory.rtone if memory.tmode == "Tone"
++                             else memory.ctone)
++        elif memory.tmode == "DTCS":
++            tone = str(memory.dtcs)
++        return (
++            str(memory.number + 1), memory.name,
++            chirp_common.format_freq(memory.freq), memory.duplex,
++            chirp_common.format_freq(memory.offset) if memory.offset else "",
++            memory.tmode, tone, memory.mode, power,
++            "Skip" if memory.skip == "S" else "",
++        )
++
++    def memory_from_row(self, row):
++        def text(column):
++            item = self.table.item(row, column)
++            return item.text().strip() if item else ""
++        memory = chirp_common.Memory()
++        memory.number = row
++        memory.name = text(1)[:7]
++        if not text(2):
++            memory.empty = True
++            return memory
++        memory.freq = chirp_common.parse_freq(text(2))
++        memory.duplex = text(3)
++        memory.offset = (chirp_common.parse_freq(text(4))
++                         if text(4) else 0)
++        memory.tmode = text(5)
++        tone = text(6)
++        if memory.tmode == "Tone" and tone:
++            memory.rtone = float(tone)
++        elif memory.tmode == "TSQL" and tone:
++            memory.ctone = float(tone)
++        elif memory.tmode == "DTCS" and tone:
++            memory.dtcs = int(tone)
++        memory.mode = text(7) or "FM"
++        levels = self.radio.get_features().valid_power_levels
++        memory.power = next(
++            (level for level in levels if str(level) == text(8)),
++            levels[0] if levels else None)
++        memory.skip = "S" if text(9).lower().startswith("skip") else ""
++        return memory
++
++    def commit_table(self):
++        if not self.radio:
++            return
++        for row in range(128):
++            memory = self.memory_from_row(row)
++            if memory.empty:
++                try:
++                    self.radio.erase_memory(row)
++                except Exception:
++                    pass
++            else:
++                errors = self.radio.validate_memory(memory)
++                if errors:
++                    raise ValueError(
++                        "Channel %d: %s" % (row + 1, "; ".join(
++                            str(error) for error in errors)))
++                self.radio.set_memory(memory)
++
++    def setup_assistant(self):
++        if not self.radio:
++            QtWidgets.QMessageBox.information(
++                self, "Download first",
++                "Download from your UV‑5R or open an image before adding "
++                "channels.")
++            return
++        dialog = SetupDialog(self)
++        if dialog.exec() != QtWidgets.QDialog.Accepted:
++            return
++        existing = []
++        for row in range(128):
++            memory = self.radio.get_memory(row)
++            if not memory.empty:
++                existing.append(memory)
++        planned = uv5r_setup.build_plan(
++            existing,
++            add_calling=dialog.calling.isChecked(),
++            add_noaa=dialog.noaa.isChecked())
++        for memory in planned:
++            self.radio.set_memory(memory)
++        for row in range(len(planned), 128):
++            try:
++                self.radio.erase_memory(row)
++            except Exception:
++                pass
++        self.load_table()
++        self.modified = True
++        self.update_state()
++        self.statusBar().showMessage(
++            "Setup assistant prepared %d channels" % len(planned))
++
++    def find_repeaters(self):
++        if not self.radio:
++            QtWidgets.QMessageBox.information(
++                self, "Download first",
++                "Download from your UV‑5R or open an image before searching "
++                "for repeaters.")
++            return
++        dialog = RepeaterBookDialog(self)
++        if dialog.exec() != QtWidgets.QDialog.Accepted:
++            return
++        self.progress.setValue(0)
++        self.progress.show()
++        self.repeaterbook_button.setEnabled(False)
++        self.statusBar().showMessage("Connecting to RepeaterBook…")
++        self.rb_thread = QtCore.QThread(self)
++        self.rb_worker = RepeaterBookWorker(dialog.params())
++        self.rb_worker.moveToThread(self.rb_thread)
++        self.rb_thread.started.connect(self.rb_worker.run)
++        self.rb_worker.progress.connect(self.radio_progress)
++        self.rb_worker.completed.connect(self.repeaters_complete)
++        self.rb_worker.failed.connect(self.repeaters_failed)
++        self.rb_worker.completed.connect(self.rb_thread.quit)
++        self.rb_worker.failed.connect(self.rb_thread.quit)
++        self.rb_thread.finished.connect(self.rb_worker.deleteLater)
++        self.rb_thread.finished.connect(self.rb_thread.deleteLater)
++        self.rb_thread.start()
++
++    def repeaters_complete(self, repeaters):
++        existing = []
++        for row in range(128):
++            memory = self.radio.get_memory(row)
++            if not memory.empty:
++                existing.append(memory)
++        before = len(existing)
++        planned = uv5r_setup.build_plan(
++            existing + list(repeaters),
++            add_calling=False,
++            add_noaa=False)
++        for memory in planned:
++            self.radio.set_memory(memory)
++        for row in range(len(planned), 128):
++            try:
++                self.radio.erase_memory(row)
++            except Exception:
++                pass
++        self.progress.hide()
++        self.load_table()
++        self.modified = True
++        self.update_state()
++        added = max(0, len(planned) - before)
++        self.statusBar().showMessage(
++            "Added %d compatible repeaters · %d channels total"
++            % (added, len(planned)))
++        QtWidgets.QMessageBox.information(
++            self, "RepeaterBook complete",
++            "Added %d compatible analog repeaters. Digital-only, duplicate, "
++            "out-of-range, and over-limit entries were removed." % added)
++
++    def repeaters_failed(self, details):
++        self.progress.hide()
++        self.update_state()
++        QtWidgets.QMessageBox.critical(
++            self, "RepeaterBook lookup failed", details)
++
++    def add_channel(self):
++        if not self.radio:
++            return
++        for row in range(128):
++            if not self.table.item(row, 2).text().strip():
++                self.table.selectRow(row)
++                self.table.scrollToItem(self.table.item(row, 0))
++                self.table.editItem(self.table.item(row, 1))
++                return
++        QtWidgets.QMessageBox.information(
++            self, "Radio full", "The UV‑5R limit is 128 channels.")
++
++    def delete_selected(self):
++        rows = {index.row() for index in self.table.selectedIndexes()}
++        if not rows:
++            return
++        self._loading = True
++        for row in rows:
++            for column in range(1, len(self.COLUMNS)):
++                self.table.setItem(row, column, QtWidgets.QTableWidgetItem(""))
++        self._loading = False
++        self.modified = True
++        self.update_state()
++
++    def cell_changed(self, _item):
++        if not self._loading:
++            self.modified = True
++            self.update_state()
++
++    def apply_filter(self, query):
++        query = query.strip().lower()
++        for row in range(128):
++            content = " ".join(
++                self.table.item(row, column).text().lower()
++                for column in (1, 2)
++                if self.table.item(row, column))
++            self.table.setRowHidden(row, bool(query and query not in content))
++
++    def update_state(self):
++        loaded = self.radio is not None
++        programmed = 0
++        if loaded:
++            programmed = sum(
++                not self.radio.get_memory(row).empty for row in range(128))
++        self.channel_metric.setText("%d / 128" % programmed)
++        self.radio_metric.setText(
++            "%s %s" % (self.radio.VENDOR, self.radio.MODEL)
++            if loaded else "Not loaded")
++        self.change_metric.setText("Unsaved" if self.modified else "Saved")
++        self.save_button.setEnabled(loaded)
++        self.upload_button.setEnabled(loaded)
++        self.repeaterbook_button.setEnabled(loaded)
++        self.assistant_button.setEnabled(loaded)
++        self.add_button.setEnabled(loaded)
++        self.download_button.setEnabled(True)
++
++    def closeEvent(self, event):
++        if self.modified:
++            answer = QtWidgets.QMessageBox.question(
++                self, "Unsaved changes",
++                "Close without saving the current radio image?",
++                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
++                QtWidgets.QMessageBox.Cancel)
++            if answer != QtWidgets.QMessageBox.Yes:
++                event.ignore()
++                return
++        event.accept()
++
++
++def main():
++    app = QtWidgets.QApplication(sys.argv)
++    app.setApplicationName("CHIRP Modern")
++    app.setStyle("Fusion")
++    app.setStyleSheet(APP_STYLE)
++    window = ModernWindow()
++    window.show()
++    sys.exit(app.exec())
 diff --git a/chirp/share/__init__.py b/chirp/share/__init__.py
 new file mode 100644
 index 0000000..326ae90
@@ -12,89 +820,11 @@ index 0000000..7bee3a7
 +++ b/chirp/stock_configs/__init__.py
 @@ -0,0 +1 @@
 +"""Bundled stock frequency configuration resources."""
-diff --git a/chirp/wxui/main.py b/chirp/wxui/main.py
-index 4baa07a..bbf601d 100644
---- a/chirp/wxui/main.py
-+++ b/chirp/wxui/main.py
-@@ -48,6 +48,7 @@ from chirp.wxui import developer
- from chirp.wxui import memedit
- from chirp.wxui import printing
- from chirp.wxui import query_sources
-+from chirp.wxui import uv5r_setup
- from chirp.wxui import radioinfo
- from chirp.wxui import radiothread
- from chirp.wxui import report
-@@ -877,6 +878,11 @@ class ChirpMain(wx.Frame):
-         self.Bind(wx.EVT_MENU, self._menu_upload, upload_item)
-         radio_menu.Append(upload_item)
- 
-+        uv5r_setup_item = wx.MenuItem(
-+            radio_menu, wx.NewId(), _("UV-5R Setup Assistant..."))
-+        self.Bind(wx.EVT_MENU, self._menu_uv5r_setup, uv5r_setup_item)
-+        radio_menu.Append(uv5r_setup_item)
-+
-         source_menu = wx.Menu()
-         radio_menu.AppendSubMenu(source_menu, _('Query Source'))
- 
-@@ -2099,6 +2105,53 @@ GNU General Public License for more details."""
-     def _menu_query_rb(self, event):
-         self._do_network_query(query_sources.RepeaterBookQueryDialog)
- 
-+    @common.error_proof()
-+    def _menu_uv5r_setup(self, event):
-+        choices = [
-+            _("2-meter and 70-centimeter calling channels"),
-+            _("Seven NOAA weather channels (receive only)"),
-+            _("Analog repeaters from RepeaterBook"),
-+        ]
-+        dialog = wx.MultiChoiceDialog(
-+            self,
-+            _("Choose the channels to include. The assistant creates a "
-+              "UV-5R-safe memory tab that you can import into a downloaded "
-+              "radio image."),
-+            _("UV-5R Setup Assistant"),
-+            choices=choices)
-+        dialog.SetSelections([0, 1])
-+        if dialog.ShowModal() != wx.ID_OK:
-+            return
-+        selected = set(dialog.GetSelections())
-+        repeater_memories = []
-+        if 2 in selected:
-+            query = query_sources.RepeaterBookQueryDialog(
-+                self, title=_("Query RepeaterBook"))
-+            if query.ShowModal() != wx.ID_OK:
-+                return
-+            repeater_memories = query.result_radio._memories
-+
-+        memories = uv5r_setup.build_plan(
-+            repeater_memories,
-+            add_calling=0 in selected,
-+            add_noaa=1 in selected)
-+        if not memories:
-+            wx.MessageBox(
-+                _("No compatible channels were selected or found."),
-+                _("UV-5R Setup Assistant"),
-+                wx.OK | wx.ICON_INFORMATION)
-+            return
-+
-+        result = uv5r_setup.UV5RSetupResult(memories)
-+        editorset = ChirpEditorSet(result, None, self._editors)
-+        self.add_editorset(editorset)
-+        wx.MessageBox(
-+            _("Created %d UV-5R-compatible channels. Open or download your "
-+              "UV-5R image, then use File > Import to add this list.")
-+            % len(memories),
-+            _("UV-5R Setup Complete"),
-+            wx.OK | wx.ICON_INFORMATION)
-+
-     def _menu_query_dm(self, event):
-         self._do_network_query(query_sources.DMRMARCQueryDialog)
- 
-diff --git a/chirp/wxui/uv5r_setup.py b/chirp/wxui/uv5r_setup.py
+diff --git a/chirp/uv5r_setup.py b/chirp/uv5r_setup.py
 new file mode 100644
 index 0000000..4627ac5
 --- /dev/null
-+++ b/chirp/wxui/uv5r_setup.py
++++ b/chirp/uv5r_setup.py
 @@ -0,0 +1,104 @@
 +"""Baofeng UV-5R starter-channel planning helpers."""
 +
@@ -200,16 +930,105 @@ index 0000000..4627ac5
 +
 +    def get_label(self):
 +        return "UV-5R Setup"
+diff --git a/chirp/wxui/main.py b/chirp/wxui/main.py
+index 4baa07a..818a447 100644
+--- a/chirp/wxui/main.py
++++ b/chirp/wxui/main.py
+@@ -48,6 +48,7 @@ from chirp.wxui import developer
+ from chirp.wxui import memedit
+ from chirp.wxui import printing
+ from chirp.wxui import query_sources
++from chirp import uv5r_setup
+ from chirp.wxui import radioinfo
+ from chirp.wxui import radiothread
+ from chirp.wxui import report
+@@ -877,6 +878,11 @@ class ChirpMain(wx.Frame):
+         self.Bind(wx.EVT_MENU, self._menu_upload, upload_item)
+         radio_menu.Append(upload_item)
+ 
++        uv5r_setup_item = wx.MenuItem(
++            radio_menu, wx.NewId(), _("UV-5R Setup Assistant..."))
++        self.Bind(wx.EVT_MENU, self._menu_uv5r_setup, uv5r_setup_item)
++        radio_menu.Append(uv5r_setup_item)
++
+         source_menu = wx.Menu()
+         radio_menu.AppendSubMenu(source_menu, _('Query Source'))
+ 
+@@ -2099,6 +2105,53 @@ GNU General Public License for more details."""
+     def _menu_query_rb(self, event):
+         self._do_network_query(query_sources.RepeaterBookQueryDialog)
+ 
++    @common.error_proof()
++    def _menu_uv5r_setup(self, event):
++        choices = [
++            _("2-meter and 70-centimeter calling channels"),
++            _("Seven NOAA weather channels (receive only)"),
++            _("Analog repeaters from RepeaterBook"),
++        ]
++        dialog = wx.MultiChoiceDialog(
++            self,
++            _("Choose the channels to include. The assistant creates a "
++              "UV-5R-safe memory tab that you can import into a downloaded "
++              "radio image."),
++            _("UV-5R Setup Assistant"),
++            choices=choices)
++        dialog.SetSelections([0, 1])
++        if dialog.ShowModal() != wx.ID_OK:
++            return
++        selected = set(dialog.GetSelections())
++        repeater_memories = []
++        if 2 in selected:
++            query = query_sources.RepeaterBookQueryDialog(
++                self, title=_("Query RepeaterBook"))
++            if query.ShowModal() != wx.ID_OK:
++                return
++            repeater_memories = query.result_radio._memories
++
++        memories = uv5r_setup.build_plan(
++            repeater_memories,
++            add_calling=0 in selected,
++            add_noaa=1 in selected)
++        if not memories:
++            wx.MessageBox(
++                _("No compatible channels were selected or found."),
++                _("UV-5R Setup Assistant"),
++                wx.OK | wx.ICON_INFORMATION)
++            return
++
++        result = uv5r_setup.UV5RSetupResult(memories)
++        editorset = ChirpEditorSet(result, None, self._editors)
++        self.add_editorset(editorset)
++        wx.MessageBox(
++            _("Created %d UV-5R-compatible channels. Open or download your "
++              "UV-5R image, then use File > Import to add this list.")
++            % len(memories),
++            _("UV-5R Setup Complete"),
++            wx.OK | wx.ICON_INFORMATION)
++
+     def _menu_query_dm(self, event):
+         self._do_network_query(query_sources.DMRMARCQueryDialog)
+ 
+diff --git a/chirp_modern.py b/chirp_modern.py
+new file mode 100644
+index 0000000..6d4a4ba
+--- /dev/null
++++ b/chirp_modern.py
+@@ -0,0 +1,5 @@
++from chirp.modern import main
++
++
++if __name__ == "__main__":
++    main()
 diff --git a/tests/unit/test_uv5r_setup.py b/tests/unit/test_uv5r_setup.py
 new file mode 100644
-index 0000000..06199f3
+index 0000000..38f5f7c
 --- /dev/null
 +++ b/tests/unit/test_uv5r_setup.py
 @@ -0,0 +1,54 @@
 +import unittest
 +
 +from chirp import chirp_common
-+from chirp.wxui import uv5r_setup
++from chirp import uv5r_setup
 +
 +
 +def memory(freq, mode="FM", duplex="", offset=0, name="RPT"):

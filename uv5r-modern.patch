@@ -1,0 +1,248 @@
+diff --git a/chirp/wxui/main.py b/chirp/wxui/main.py
+index 4baa07a..bbf601d 100644
+--- a/chirp/wxui/main.py
++++ b/chirp/wxui/main.py
+@@ -48,6 +48,7 @@ from chirp.wxui import developer
+ from chirp.wxui import memedit
+ from chirp.wxui import printing
+ from chirp.wxui import query_sources
++from chirp.wxui import uv5r_setup
+ from chirp.wxui import radioinfo
+ from chirp.wxui import radiothread
+ from chirp.wxui import report
+@@ -877,6 +878,11 @@ class ChirpMain(wx.Frame):
+         self.Bind(wx.EVT_MENU, self._menu_upload, upload_item)
+         radio_menu.Append(upload_item)
+ 
++        uv5r_setup_item = wx.MenuItem(
++            radio_menu, wx.NewId(), _("UV-5R Setup Assistant..."))
++        self.Bind(wx.EVT_MENU, self._menu_uv5r_setup, uv5r_setup_item)
++        radio_menu.Append(uv5r_setup_item)
++
+         source_menu = wx.Menu()
+         radio_menu.AppendSubMenu(source_menu, _('Query Source'))
+ 
+@@ -2099,6 +2105,53 @@ GNU General Public License for more details."""
+     def _menu_query_rb(self, event):
+         self._do_network_query(query_sources.RepeaterBookQueryDialog)
+ 
++    @common.error_proof()
++    def _menu_uv5r_setup(self, event):
++        choices = [
++            _("2-meter and 70-centimeter calling channels"),
++            _("Seven NOAA weather channels (receive only)"),
++            _("Analog repeaters from RepeaterBook"),
++        ]
++        dialog = wx.MultiChoiceDialog(
++            self,
++            _("Choose the channels to include. The assistant creates a "
++              "UV-5R-safe memory tab that you can import into a downloaded "
++              "radio image."),
++            _("UV-5R Setup Assistant"),
++            choices=choices)
++        dialog.SetSelections([0, 1])
++        if dialog.ShowModal() != wx.ID_OK:
++            return
++        selected = set(dialog.GetSelections())
++        repeater_memories = []
++        if 2 in selected:
++            query = query_sources.RepeaterBookQueryDialog(
++                self, title=_("Query RepeaterBook"))
++            if query.ShowModal() != wx.ID_OK:
++                return
++            repeater_memories = query.result_radio._memories
++
++        memories = uv5r_setup.build_plan(
++            repeater_memories,
++            add_calling=0 in selected,
++            add_noaa=1 in selected)
++        if not memories:
++            wx.MessageBox(
++                _("No compatible channels were selected or found."),
++                _("UV-5R Setup Assistant"),
++                wx.OK | wx.ICON_INFORMATION)
++            return
++
++        result = uv5r_setup.UV5RSetupResult(memories)
++        editorset = ChirpEditorSet(result, None, self._editors)
++        self.add_editorset(editorset)
++        wx.MessageBox(
++            _("Created %d UV-5R-compatible channels. Open or download your "
++              "UV-5R image, then use File > Import to add this list.")
++            % len(memories),
++            _("UV-5R Setup Complete"),
++            wx.OK | wx.ICON_INFORMATION)
++
+     def _menu_query_dm(self, event):
+         self._do_network_query(query_sources.DMRMARCQueryDialog)
+ 
+diff --git a/chirp/wxui/uv5r_setup.py b/chirp/wxui/uv5r_setup.py
+new file mode 100644
+index 0000000..4627ac5
+--- /dev/null
++++ b/chirp/wxui/uv5r_setup.py
+@@ -0,0 +1,104 @@
++"""Baofeng UV-5R starter-channel planning helpers."""
++
++from chirp import chirp_common
++from chirp.sources import base
++
++
++UV5R_RANGES = (
++    (136_000_000, 174_000_000),
++    (400_000_000, 520_000_000),
++)
++MAX_CHANNELS = 128
++
++CALLING_CHANNELS = (
++    ("2M CALL", 146_520_000),
++    ("70CMCALL", 446_000_000),
++)
++
++NOAA_CHANNELS = (
++    ("WX1", 162_550_000),
++    ("WX2", 162_400_000),
++    ("WX3", 162_475_000),
++    ("WX4", 162_425_000),
++    ("WX5", 162_450_000),
++    ("WX6", 162_500_000),
++    ("WX7", 162_525_000),
++)
++
++
++def _memory(name, frequency, receive_only=False):
++    memory = chirp_common.Memory()
++    memory.name = name
++    memory.freq = frequency
++    memory.mode = "FM"
++    memory.duplex = "off" if receive_only else ""
++    memory.comment = (
++        "Receive only - NOAA Weather Radio"
++        if receive_only else "Amateur calling frequency"
++    )
++    return memory
++
++
++def in_uv5r_range(frequency):
++    return any(low <= frequency <= high for low, high in UV5R_RANGES)
++
++
++def is_analog(memory):
++    return memory.mode in ("", "Auto", "FM", "NFM")
++
++
++def memory_key(memory):
++    """Treat repeat listings for the same RF pair as duplicates."""
++    tx_frequency = memory.freq
++    if memory.duplex == "+":
++        tx_frequency += memory.offset
++    elif memory.duplex == "-":
++        tx_frequency -= memory.offset
++    elif memory.duplex == "split":
++        tx_frequency = memory.offset
++    elif memory.duplex == "off":
++        tx_frequency = 0
++    return memory.freq, tx_frequency
++
++
++def build_plan(repeater_memories=(), add_calling=True, add_noaa=True,
++               maximum=MAX_CHANNELS):
++    """Build a UV-5R-compatible list, preserving the requested order."""
++    candidates = []
++    if add_calling:
++        candidates.extend(_memory(name, freq)
++                          for name, freq in CALLING_CHANNELS)
++    if add_noaa:
++        candidates.extend(_memory(name, freq, receive_only=True)
++                          for name, freq in NOAA_CHANNELS)
++    candidates.extend(memory.dupe() for memory in repeater_memories)
++
++    planned = []
++    seen = set()
++    for memory in candidates:
++        if not in_uv5r_range(memory.freq) or not is_analog(memory):
++            continue
++        key = memory_key(memory)
++        if key in seen:
++            continue
++        seen.add(key)
++        memory.number = len(planned)
++        memory.name = memory.name[:7]
++        if memory.mode in ("", "Auto"):
++            memory.mode = "FM"
++        planned.append(memory)
++        if len(planned) == maximum:
++            break
++    return planned
++
++
++class UV5RSetupResult(base.NetworkResultRadio):
++    VENDOR = "Baofeng"
++    MODEL = "UV-5R Setup"
++
++    def __init__(self, memories):
++        super().__init__()
++        self._memories = memories
++
++    def get_label(self):
++        return "UV-5R Setup"
+diff --git a/tests/unit/test_uv5r_setup.py b/tests/unit/test_uv5r_setup.py
+new file mode 100644
+index 0000000..06199f3
+--- /dev/null
++++ b/tests/unit/test_uv5r_setup.py
+@@ -0,0 +1,54 @@
++import unittest
++
++from chirp import chirp_common
++from chirp.wxui import uv5r_setup
++
++
++def memory(freq, mode="FM", duplex="", offset=0, name="RPT"):
++    result = chirp_common.Memory()
++    result.freq = freq
++    result.mode = mode
++    result.duplex = duplex
++    result.offset = offset
++    result.name = name
++    return result
++
++
++class UV5RSetupTest(unittest.TestCase):
++    def test_presets(self):
++        result = uv5r_setup.build_plan([])
++        self.assertEqual(9, len(result))
++        self.assertEqual([146_520_000, 446_000_000],
++                         [item.freq for item in result[:2]])
++        self.assertTrue(all(item.duplex == "off" for item in result[2:]))
++
++    def test_filters_digital_out_of_range_and_duplicates(self):
++        result = uv5r_setup.build_plan([
++            memory(146_940_000, duplex="-", offset=600_000),
++            memory(146_940_000, duplex="-", offset=600_000, name="DUPE"),
++            memory(145_000_000, mode="DMR"),
++            memory(900_000_000),
++        ], add_calling=False, add_noaa=False)
++        self.assertEqual(1, len(result))
++        self.assertEqual("RPT", result[0].name)
++
++    def test_same_receive_frequency_different_input_is_not_duplicate(self):
++        result = uv5r_setup.build_plan([
++            memory(146_940_000, duplex="-", offset=600_000),
++            memory(146_940_000, duplex="+", offset=600_000),
++        ], add_calling=False, add_noaa=False)
++        self.assertEqual(2, len(result))
++
++    def test_limit_and_numbering(self):
++        repeaters = [memory(144_000_000 + index * 5_000,
++                            name="LONGNAME%d" % index)
++                     for index in range(200)]
++        result = uv5r_setup.build_plan(
++            repeaters, add_calling=False, add_noaa=False)
++        self.assertEqual(128, len(result))
++        self.assertEqual(list(range(128)), [item.number for item in result])
++        self.assertTrue(all(len(item.name) <= 7 for item in result))
++
++    def test_custom_limit(self):
++        result = uv5r_setup.build_plan([], maximum=1)
++        self.assertEqual(1, len(result))

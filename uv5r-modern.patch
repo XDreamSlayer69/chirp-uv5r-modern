@@ -1,9 +1,9 @@
 diff --git a/chirp/modern.py b/chirp/modern.py
 new file mode 100644
-index 0000000..20adda2
+index 0000000..860678f
 --- /dev/null
 +++ b/chirp/modern.py
-@@ -0,0 +1,878 @@
+@@ -0,0 +1,1023 @@
 +"""Modern UV-5R-focused desktop interface backed by CHIRP drivers."""
 +
 +import sys
@@ -179,15 +179,98 @@ index 0000000..20adda2
 +        layout.addSpacing(12)
 +        layout.addWidget(self.calling)
 +        layout.addWidget(self.noaa)
++        self.nearby = QtWidgets.QCheckBox(
++            "Nearby analog repeaters from RepeaterBook")
++        layout.addWidget(self.nearby)
++
++        self.location_box = QtWidgets.QGroupBox("Local repeater area")
++        location = QtWidgets.QFormLayout(self.location_box)
++        self.country = QtWidgets.QComboBox()
++        self.country.addItems(repeaterbook.COUNTRIES)
++        self.country.setCurrentText("United States")
++        self.country.currentTextChanged.connect(self.update_states)
++        location.addRow("Country", self.country)
++        self.state = QtWidgets.QComboBox()
++        location.addRow("State / province", self.state)
++        self.latitude = QtWidgets.QLineEdit()
++        self.latitude.setPlaceholderText("Optional, e.g. 40.7128")
++        location.addRow("Latitude", self.latitude)
++        self.longitude = QtWidgets.QLineEdit()
++        self.longitude.setPlaceholderText("Optional, e.g. -74.0060")
++        location.addRow("Longitude", self.longitude)
++        self.distance = QtWidgets.QSpinBox()
++        self.distance.setRange(0, 1000)
++        self.distance.setValue(80)
++        self.distance.setSuffix(" km")
++        self.distance.setSpecialValueText("No distance limit")
++        location.addRow("Maximum distance", self.distance)
++        self.open_only = QtWidgets.QCheckBox("Open repeaters only")
++        self.open_only.setChecked(True)
++        location.addRow("", self.open_only)
++        layout.addWidget(self.location_box)
++        self.nearby.toggled.connect(self.location_box.setEnabled)
++        self.location_box.setEnabled(False)
++        self.update_states()
++
 +        buttons = QtWidgets.QDialogButtonBox(
 +            QtWidgets.QDialogButtonBox.Cancel |
 +            QtWidgets.QDialogButtonBox.Apply)
 +        self.apply_button = buttons.button(
 +            QtWidgets.QDialogButtonBox.Apply)
-+        self.apply_button.clicked.connect(self.accept)
++        self.apply_button.clicked.connect(self.validate_and_accept)
 +        buttons.rejected.connect(self.reject)
 +        layout.addSpacing(16)
 +        layout.addWidget(buttons)
++
++    def update_states(self):
++        self.state.clear()
++        self.state.addItem("Choose an area...", "")
++        for state in repeaterbook.STATES.get(
++                self.country.currentText(), []):
++            self.state.addItem(state, state)
++
++    def validate_and_accept(self):
++        if self.nearby.isChecked() and not self.state.currentData():
++            QtWidgets.QMessageBox.warning(
++                self, "Choose a local area",
++                "Select a state or province for the repeater search.")
++            return
++        lat = self.latitude.text().strip()
++        lon = self.longitude.text().strip()
++        if bool(lat) != bool(lon):
++            QtWidgets.QMessageBox.warning(
++                self, "Incomplete coordinates",
++                "Enter both latitude and longitude, or leave both blank.")
++            return
++        try:
++            if lat:
++                latitude = float(lat)
++                longitude = float(lon)
++                if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
++                    raise ValueError
++        except ValueError:
++            QtWidgets.QMessageBox.warning(
++                self, "Invalid coordinates",
++                "Latitude must be -90 to 90 and longitude -180 to 180.")
++            return
++        self.accept()
++
++    def repeater_params(self):
++        return {
++            "country": self.country.currentText(),
++            "state": self.state.currentData(),
++            "lat": self.latitude.text().strip(),
++            "lon": self.longitude.text().strip(),
++            "dist": str(self.distance.value() or ""),
++            "filter": "",
++            "bands": [],
++            "modes": ["FM"],
++            "service": "",
++            "service_display": "Amateur",
++            "fmconv": False,
++            "openonly": self.open_only.isChecked(),
++            "cached": False,
++        }
 +
 +
 +class RepeaterBookDialog(QtWidgets.QDialog):
@@ -690,22 +773,90 @@ index 0000000..20adda2
 +            memory = self.radio.get_memory(row)
 +            if not memory.empty:
 +                existing.append(memory)
++        if dialog.nearby.isChecked():
++            self.setup_request = {
++                "existing": existing,
++                "calling": dialog.calling.isChecked(),
++                "noaa": dialog.noaa.isChecked(),
++            }
++            self.progress.setValue(0)
++            self.progress.show()
++            self.assistant_button.setEnabled(False)
++            self.statusBar().showMessage(
++                "Finding local analog repeaters...")
++            self.setup_thread = QtCore.QThread(self)
++            self.setup_worker = RepeaterBookWorker(
++                dialog.repeater_params())
++            self.setup_worker.moveToThread(self.setup_thread)
++            self.setup_thread.started.connect(self.setup_worker.run)
++            self.setup_worker.progress.connect(self.radio_progress)
++            self.setup_worker.completed.connect(
++                self.setup_repeaters_complete)
++            self.setup_worker.failed.connect(self.setup_repeaters_failed)
++            self.setup_worker.completed.connect(self.setup_thread.quit)
++            self.setup_worker.failed.connect(self.setup_thread.quit)
++            self.setup_thread.finished.connect(
++                self.setup_worker.deleteLater)
++            self.setup_thread.finished.connect(
++                self.setup_thread.deleteLater)
++            self.setup_thread.start()
++            return
++        self.apply_setup_plan(
++            existing, [],
++            dialog.calling.isChecked(), dialog.noaa.isChecked())
++
++    def apply_setup_plan(self, existing, repeaters, add_calling, add_noaa):
 +        planned = uv5r_setup.build_plan(
-+            existing,
-+            add_calling=dialog.calling.isChecked(),
-+            add_noaa=dialog.noaa.isChecked())
++            list(existing) + list(repeaters),
++            add_calling=add_calling,
++            add_noaa=add_noaa)
++        self.write_plan(planned)
++        self.load_table()
++        self.modified = True
++        self.update_state()
++        self.statusBar().showMessage(
++            "Setup assistant prepared %d channels" % len(planned))
++        return planned
++
++    def write_plan(self, planned):
++        power_levels = self.radio.get_features().valid_power_levels
 +        for memory in planned:
++            if power_levels:
++                requested = str(memory.power) if memory.power else ""
++                memory.power = next(
++                    (level for level in power_levels
++                     if str(level) == requested),
++                    power_levels[0])
 +            self.radio.set_memory(memory)
 +        for row in range(len(planned), 128):
 +            try:
 +                self.radio.erase_memory(row)
 +            except Exception:
 +                pass
-+        self.load_table()
-+        self.modified = True
++
++    def setup_repeaters_complete(self, repeaters):
++        request = self.setup_request
++        planned = self.apply_setup_plan(
++            request["existing"], repeaters,
++            request["calling"], request["noaa"])
++        self.progress.hide()
++        self.assistant_button.setEnabled(True)
++        baseline = uv5r_setup.build_plan(
++            request["existing"],
++            add_calling=request["calling"],
++            add_noaa=request["noaa"])
++        added = max(0, len(planned) - len(baseline))
++        QtWidgets.QMessageBox.information(
++            self, "Setup complete",
++            "Prepared %d channels, including %d compatible local analog "
++            "repeaters." % (len(planned), added))
++
++    def setup_repeaters_failed(self, details):
++        self.progress.hide()
++        self.assistant_button.setEnabled(True)
 +        self.update_state()
-+        self.statusBar().showMessage(
-+            "Setup assistant prepared %d channels" % len(planned))
++        QtWidgets.QMessageBox.critical(
++            self, "Local repeater lookup failed", details)
 +
 +    def find_repeaters(self):
 +        dialog = RepeaterBookDialog(self)
@@ -746,13 +897,7 @@ index 0000000..20adda2
 +            existing + list(repeaters),
 +            add_calling=False,
 +            add_noaa=False)
-+        for memory in planned:
-+            self.radio.set_memory(memory)
-+        for row in range(len(planned), 128):
-+            try:
-+                self.radio.erase_memory(row)
-+            except Exception:
-+                pass
++        self.write_plan(planned)
 +        self.progress.hide()
 +        self.load_table()
 +        self.modified = True
@@ -1097,10 +1242,10 @@ index 0000000..6d4a4ba
 +    main()
 diff --git a/tests/unit/test_modern.py b/tests/unit/test_modern.py
 new file mode 100644
-index 0000000..dd5ab56
+index 0000000..6768936
 --- /dev/null
 +++ b/tests/unit/test_modern.py
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,295 @@
 +import os
 +import tempfile
 +import unittest
@@ -1342,6 +1487,56 @@ index 0000000..dd5ab56
 +
 +        self.assertEqual(
 +            QtWidgets.QDialog.Accepted, dialog.result())
++
++    def test_setup_dialog_requires_area_for_nearby_repeaters(self):
++        dialog = modern.SetupDialog()
++        dialog.nearby.setChecked(True)
++        dialog.show()
++        with mock.patch.object(
++                QtWidgets.QMessageBox, "warning") as warning:
++            QtTest.QTest.mouseClick(
++                dialog.apply_button, QtCore.Qt.LeftButton)
++
++        warning.assert_called_once()
++        self.assertNotEqual(
++            QtWidgets.QDialog.Accepted, dialog.result())
++        dialog.reject()
++
++    def test_setup_assistant_fetches_and_applies_local_repeaters(self):
++        fresh = modern.ModernWindow()
++        dialog = modern.SetupDialog(fresh)
++        dialog.nearby.setChecked(True)
++        dialog.state.setCurrentIndex(1)
++        dialog.exec = mock.Mock(
++            return_value=QtWidgets.QDialog.Accepted)
++        local = memory(0, "LOCALRP", 146_940_000)
++        local.duplex = "-"
++        local.offset = 600_000
++        try:
++            with mock.patch.object(
++                    modern, "SetupDialog",
++                    return_value=dialog), \
++                    mock.patch.object(QtCore.QThread, "start"):
++                fresh.setup_assistant()
++
++            self.assertEqual(
++                dialog.state.currentData(),
++                fresh.setup_worker.params["state"])
++            with mock.patch.object(
++                    QtWidgets.QMessageBox, "information"):
++                fresh.setup_repeaters_complete([local])
++
++            programmed = [
++                fresh.radio.get_memory(number)
++                for number in range(128)
++                if not fresh.radio.get_memory(number).empty
++            ]
++            self.assertEqual(10, len(programmed))
++            self.assertIn(
++                146_940_000, [item.freq for item in programmed])
++        finally:
++            fresh.modified = False
++            fresh.close()
 +
 +
 +if __name__ == "__main__":

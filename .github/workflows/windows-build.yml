@@ -40,9 +40,21 @@ jobs:
       - name: Install dependencies
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install --upgrade pip
-          python -m pip install -r chirp-source/requirements.txt
-          python -m pip install pytest pyyaml ddt pyinstaller
+          python -m pip install `
+            wxPython==4.2.5 `
+            pyserial `
+            requests `
+            pywin32 `
+            suds `
+            yattag `
+            lark `
+            pytest `
+            pyyaml `
+            ddt `
+            pyinstaller
 
       - name: Run UV-5R planner tests
         working-directory: chirp-source

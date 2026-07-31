@@ -1,3 +1,17 @@
+diff --git a/chirp/share/__init__.py b/chirp/share/__init__.py
+new file mode 100644
+index 0000000..326ae90
+--- /dev/null
++++ b/chirp/share/__init__.py
+@@ -0,0 +1 @@
++"""Application images and desktop integration resources."""
+diff --git a/chirp/stock_configs/__init__.py b/chirp/stock_configs/__init__.py
+new file mode 100644
+index 0000000..7bee3a7
+--- /dev/null
++++ b/chirp/stock_configs/__init__.py
+@@ -0,0 +1 @@
++"""Bundled stock frequency configuration resources."""
 diff --git a/chirp/wxui/main.py b/chirp/wxui/main.py
 index 4baa07a..bbf601d 100644
 --- a/chirp/wxui/main.py

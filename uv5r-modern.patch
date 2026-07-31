@@ -1,9 +1,9 @@
 diff --git a/chirp/modern.py b/chirp/modern.py
 new file mode 100644
-index 0000000..6c565af
+index 0000000..20adda2
 --- /dev/null
 +++ b/chirp/modern.py
-@@ -0,0 +1,876 @@
+@@ -0,0 +1,878 @@
 +"""Modern UV-5R-focused desktop interface backed by CHIRP drivers."""
 +
 +import sys
@@ -182,7 +182,9 @@ index 0000000..6c565af
 +        buttons = QtWidgets.QDialogButtonBox(
 +            QtWidgets.QDialogButtonBox.Cancel |
 +            QtWidgets.QDialogButtonBox.Apply)
-+        buttons.accepted.connect(self.accept)
++        self.apply_button = buttons.button(
++            QtWidgets.QDialogButtonBox.Apply)
++        self.apply_button.clicked.connect(self.accept)
 +        buttons.rejected.connect(self.reject)
 +        layout.addSpacing(16)
 +        layout.addWidget(buttons)
@@ -1095,10 +1097,10 @@ index 0000000..6d4a4ba
 +    main()
 diff --git a/tests/unit/test_modern.py b/tests/unit/test_modern.py
 new file mode 100644
-index 0000000..a738d23
+index 0000000..dd5ab56
 --- /dev/null
 +++ b/tests/unit/test_modern.py
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,245 @@
 +import os
 +import tempfile
 +import unittest
@@ -1106,7 +1108,7 @@ index 0000000..a738d23
 +
 +os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 +
-+from PySide6 import QtCore, QtWidgets
++from PySide6 import QtCore, QtTest, QtWidgets
 +
 +from chirp import chirp_common
 +from chirp import modern
@@ -1330,6 +1332,16 @@ index 0000000..a738d23
 +            information.assert_called_once()
 +        finally:
 +            fresh.close()
++
++    def test_setup_dialog_apply_button_accepts(self):
++        dialog = modern.SetupDialog()
++        dialog.show()
++
++        QtTest.QTest.mouseClick(
++            dialog.apply_button, QtCore.Qt.LeftButton)
++
++        self.assertEqual(
++            QtWidgets.QDialog.Accepted, dialog.result())
 +
 +
 +if __name__ == "__main__":

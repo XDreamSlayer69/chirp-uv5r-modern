@@ -58,7 +58,12 @@ jobs:
 
       - name: Run UV-5R planner tests
         working-directory: chirp-source
-        run: python -m pytest -q tests/unit/test_uv5r_setup.py
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >
+          python -m pytest -q
+          tests/unit/test_uv5r_setup.py
+          tests/unit/test_modern.py
 
       - name: Build portable Windows application
         working-directory: chirp-source
